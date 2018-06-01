@@ -1,67 +1,101 @@
 #lang racket/base
 (require racket/match)
 
-(struct :con (b))
+;; Expressions
 (struct :var (x))
-(struct :lam (x m))
-(struct :app (m n))
-(struct :prm (o ms))
+(struct :lam (xs m))
+(struct :app (m ns))
+(struct :callcc (m))
 
+;; External Values
+(struct :con (b))
+(struct :prm (o))
+
+;; Internal Values
 (struct :clo (l e))
+(struct :kont (k))
 
+;; Continuations
 (struct k:ret ())
-(struct k:arg (n e k))
-(struct k:fn (v k))
-(struct k:prm (o vs e ms k))
+(struct k:fun (e ns k))
+(define (k:fun* e ns k) (k:fun (and (not (null? ns)) e) ns k))
+(struct k:app (fv vs e ns k))
+
+(define (hash-set-all h ks vs)
+  (for/fold ([h h]) ([k (in-list ks)] [v (in-list vs)])
+    (hash-set h k v)))
+
+(define (cek-apply fv vs k)
+  (match fv
+    [(:kont k)
+     (match-define (list v) vs)
+     (cek v #f k)]
+    [(:clo (:lam xs m) e)
+     (cek m (hash-set-all e xs vs) k)]
+    [(:prm o)
+     (cek (:con (apply o (map :con-b vs))) #f k)]))
 
 (define (cek c [e (hasheq)] [k (k:ret)])
   (match c
-    [(:var x) (cek (hash-ref e x) #f k)]
-    [(:lam x m) (cek (:clo c e) #f k)]
-    [(:app m n) (cek m e (k:arg n e k))]
-    [(:prm o '()) (cek (:con (o)) #f k)]
-    [(:prm o (cons m ms)) (cek m e (k:prm o '() e ms k))]
+    [(:var x)    (cek (hash-ref e x) #f k)]
+    [(:lam _ _)  (cek (:clo c e) #f k)]
+    [(:app m ns) (cek m e (k:fun* e ns k))]
+    [(:callcc m) (cek (:app m (list (:kont k))) e k)]
     [v
      (match k
+       [(k:fun e '() k)
+        (cek-apply v '() k)]
+       [(k:fun e (cons n ns) k)
+        (cek n e (k:app v '() e ns k))]
+       [(k:app fv vs e (cons n ns) k)
+        (cek n e (k:app fv (cons v vs) e ns k))]
+       [(k:app fv vs e '() k)
+        (cek-apply fv (reverse (cons v vs)) k)]
        [(k:ret)
         (match v
           [(:con b) b]
-          [(:clo _ _) 'lambda])]
-       [(k:arg n e k)
-        (cek n e (k:fn v k))]
-       [(k:fn (:clo (:lam x m) e) k)
-        (cek m (hash-set e x v) k)]
-       [(k:prm o vs _ '() k)
-        (cek (:con (apply o (map :con-b (reverse (cons v vs))))) #f k)]
-       [(k:prm o vs e (cons m ms) k)
-        (cek m e (k:prm o (cons v vs) e ms k))])]))
+          [(:clo _ _) 'lambda]
+          [(:kont _) 'continuation]
+          [(:prm _) 'primitive])])]))
 
 (module+ test
   (require chk)
   (chk (cek (:con 5)) 5)
-  (chk (cek (:prm + (list (:con 5) (:con 5)))) 10)
-  (chk (cek (:app (:lam 'x (:var 'x)) (:con 5))) 5)
+  (chk (cek (:app (:prm +) (list (:con 5) (:con 5)))) 10)
+  (chk (cek (:app (:lam '(x) (:var 'x)) (list (:con 5)))) 5)
 
   (define (pow2 i)
     (cond
       [(zero? i) (:con 1)]
       [else
        (define im1 (pow2 (sub1 i)))
-       (:app (:lam 'x (:prm + (list (:var 'x) (:var 'x))))
-             im1)]))
+       (:app (:lam '(x) (:app (:prm +) (list (:var 'x) (:var 'x))))
+             (list im1))]))
 
   (chk (cek (pow2 6)) (expt 2 6)))
 
 (provide cek)
 (module+ base
-  (define-syntax-rule (-#%app m n) (:app m n))
-  (define-syntax-rule (-+ x y) (:prm + (list x y)))
+  (require (for-syntax racket/base))
+  (define-syntax-rule (-#%app m n ...) (:app m (list n ...)))
+  (define -+ (:prm +))
   (define-syntax-rule (-#%datum . d) (:con (#%datum . d)))
-  (define-syntax-rule (-lambda (x) m)
-    (let ([x-id (gensym)])
-      (:lam x-id (let ([x (:var x-id)]) m))))
-  (define-syntax-rule (-let ([x xe]) b)
-    (-#%app (-lambda (x) b) xe))
+  (define-syntax (-lambda stx)
+    (syntax-case stx ()
+      [(_ (x ...) m)
+       ;; XXX check xs are unique
+       (with-syntax ([(x-id ...) (generate-temporaries #'(x ...))])
+         (syntax/loc stx
+           (let ([x-id (gensym)] ...)
+             (:lam (list x-id ...)
+                   (let ([x (:var x-id)] ...)
+                     m)))))]))
+  (define-syntax-rule (-let ([x xe] ...) b)
+    (-#%app (-lambda (x ...) b) xe ...))
+  (define-syntax-rule (-call/cc m) (:callcc m))
+  (define-syntax-rule (-let/cc k m)
+    (-call/cc (-lambda (k) m)))
   (provide
    (rename-out [-+ +] [-#%app #%app] [-#%datum #%datum]
-               [-lambda lambda] [-lambda λ] [-let let])))
+               [-lambda lambda] [-lambda λ] [-let let]
+               [-call/cc call/cc] [-let/cc let/cc])))

@@ -7,6 +7,8 @@
 (chk (cek (dsl (+ 5 5))) 10)
 (chk (cek (dsl ((λ (x) x) 5))) 5)
 
+(chk (cek (dsl +)) 'primitive)
+
 (define (pow2 i)
   (cond
     [(zero? i) (dsl 1)]
@@ -15,3 +17,7 @@
             (+ x x)))]))
 
 (chk (cek (pow2 5)) (expt 2 5))
+
+(chk (cek (dsl (+ 5 (let/cc k (+ 10 (k 7)))))) 12)
+
+(chk (cek (dsl (let/cc k k))) 'continuation)
